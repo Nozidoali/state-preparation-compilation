@@ -75,7 +75,7 @@ def cardinality_reduction_by_one(
 
     w0 = new_state[idx0]
     w1 = new_state[idx1]
-    theta = 2.0 * math.atan2(w1, w0)
+    theta = 2.0 * math.atan2(w0, w1)
     if (index1 >> diff_qubit) & 1:
         theta = -math.pi + theta
 
@@ -114,17 +114,16 @@ def prepare_state_sparse(
         seen.add(h)
 
         new_state, gates = cardinality_reduction_by_one(curr, n_bits)
-        all_gates.extend(gates)
-        curr = new_state
-
-        new_card = cardinality(curr)
+        new_card = cardinality(new_state)
         if new_card >= prev_card:
             no_reduction += 1
             if no_reduction > 3:
                 break
         else:
+            all_gates.extend(gates)
+            curr = new_state
             no_reduction = 0
-        prev_card = new_card
+        prev_card = cardinality(curr)
 
     if curr:
         index = next(iter(curr.keys()))
@@ -151,7 +150,7 @@ def _emit_gates(qc: QuantumCircuit, gates: List[dict]) -> None:
             if not ctrl_val:
                 qc.x(ctrl)
         elif g["type"] == "mcry":
-            theta = g["theta"]
+            theta = -g["theta"]
             ctrls = g["ctrls"]
             phases = g["phases"]
             target = g["target"]
