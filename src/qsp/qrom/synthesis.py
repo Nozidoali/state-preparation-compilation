@@ -50,20 +50,13 @@ def _build_unary_iteration(
     qc.cx(addr[0], unary[1])
 
     for level in range(1, n):
-        stride = 1 << level
-        for j in range(0, N, stride):
-            src = j + stride // 2 - 1
-            if src >= N:
-                break
-            dst_lo = j + stride // 2
-            dst_hi = min(j + stride - 1, N - 1)
-
-            qc.x(addr[level])
-            qc.ccx(unary[src], addr[level], unary[dst_lo])
-            qc.x(addr[level])
-
-            if dst_hi < N and dst_hi != dst_lo:
-                qc.ccx(unary[src], addr[level], unary[dst_hi])
+        step = 1 << level
+        for j in range(step - 1, -1, -1):
+            t = j + step
+            if t >= N:
+                continue
+            qc.ccx(unary[j], addr[level], unary[t])
+            qc.cx(unary[t], unary[j])
 
 
 def _uncompute_unary_iteration(
@@ -75,20 +68,13 @@ def _uncompute_unary_iteration(
     N = len(unary)
 
     for level in range(n - 1, 0, -1):
-        stride = 1 << level
-        for j in range(N - stride, -1, -stride):
-            src = j + stride // 2 - 1
-            if src >= N:
+        step = 1 << level
+        for j in range(step):
+            t = j + step
+            if t >= N:
                 continue
-            dst_lo = j + stride // 2
-            dst_hi = min(j + stride - 1, N - 1)
-
-            if dst_hi < N and dst_hi != dst_lo:
-                qc.ccx(unary[src], addr[level], unary[dst_hi])
-
-            qc.x(addr[level])
-            qc.ccx(unary[src], addr[level], unary[dst_lo])
-            qc.x(addr[level])
+            qc.cx(unary[t], unary[j])
+            qc.ccx(unary[j], addr[level], unary[t])
 
     qc.cx(addr[0], unary[1])
     qc.x(addr[0])
@@ -104,14 +90,11 @@ def _load_data(
     data_bits: int,
 ) -> int:
     cx_count = 0
-    prev = 0
     for i, val in enumerate(data):
-        diff = val if i == 0 else (val ^ prev)
         for b in range(data_bits):
-            if (diff >> b) & 1:
+            if (val >> b) & 1:
                 qc.cx(unary[i], target[b])
                 cx_count += 1
-        prev = val
     return cx_count
 
 
@@ -168,8 +151,8 @@ def synthesize_select_swap(
 
     nq = 0
     addr = list(range(n)); nq += n
-    quot_q = addr[:q_bits]
-    rem_q = addr[q_bits:]
+    rem_q = addr[:r_bits]
+    quot_q = addr[r_bits:]
 
     unary = list(range(nq, nq + n_quotients)); nq += n_quotients
 
@@ -213,10 +196,11 @@ def synthesize_select_swap(
                 if partner >= lam:
                     continue
                 for j in range(b):
-                    qc.ccx(rem_q[bit], reg_groups[reg][j], reg_groups[partner][j])
-                    qc.cx(reg_groups[partner][j], reg_groups[reg][j])
+                    qc.cx(reg_groups[reg][j], reg_groups[partner][j])
+                    qc.ccx(rem_q[bit], reg_groups[partner][j], reg_groups[reg][j])
+                    qc.cx(reg_groups[reg][j], reg_groups[partner][j])
                     swap_ccx += 1
-                    swap_cx += 1
+                    swap_cx += 2
 
     for j in range(b):
         qc.cx(reg_groups[0][j], output[j])

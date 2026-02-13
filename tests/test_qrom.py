@@ -43,20 +43,37 @@ class TestBasicSelect:
 
     def test_basic_select_simulation(self):
         data = [0b01, 0b10, 0b11, 0b00]
-        res = synthesize_basic_select(data, 2, 2)
+        addr_bits = 2
+        data_bits = 2
+        res = synthesize_basic_select(data, addr_bits, data_bits)
         qc = res.qc
 
         for addr_val in range(4):
-            init = Statevector.from_label("0" * qc.num_qubits)
-            prep = init.evolve(qc)
-
-            test_qc = qc.copy()
-            for bit in range(2):
+            prep_qc = type(qc)(qc.num_qubits)
+            for bit in range(addr_bits):
                 if (addr_val >> bit) & 1:
-                    test_qc2 = type(qc)(qc.num_qubits)
-                    test_qc2.x(bit)
-                    test_qc2.compose(qc, inplace=True)
-                    prep = Statevector.from_label("0" * qc.num_qubits).evolve(test_qc2)
+                    prep_qc.x(bit)
+            prep_qc.compose(qc, inplace=True)
+
+            sv = Statevector.from_label("0" * qc.num_qubits).evolve(prep_qc)
+            probs = np.abs(sv.data) ** 2
+
+            expected_val = data[addr_val]
+            n = qc.num_qubits
+            out_start = res.output_qubits[0]
+            found = False
+            for idx in range(len(probs)):
+                if probs[idx] < 1e-6:
+                    continue
+                out_val = 0
+                for b in range(data_bits):
+                    if (idx >> res.output_qubits[b]) & 1:
+                        out_val |= (1 << b)
+                assert out_val == expected_val, (
+                    f"addr={addr_val}: expected output {expected_val}, got {out_val}"
+                )
+                found = True
+            assert found, f"addr={addr_val}: no nonzero probability states found"
 
 
 class TestSelectSwap:
@@ -65,6 +82,39 @@ class TestSelectSwap:
         res = synthesize_select_swap(data, 2, 2, 2)
         assert res.t_count > 0
         assert res.lambda_used == 2
+
+    def test_select_swap_simulation(self):
+        data = [0b01, 0b10, 0b11, 0b00]
+        addr_bits = 2
+        data_bits = 2
+        lam = 2
+        res = synthesize_select_swap(data, addr_bits, data_bits, lam)
+        qc = res.qc
+
+        for addr_val in range(4):
+            prep_qc = type(qc)(qc.num_qubits)
+            for bit in range(addr_bits):
+                if (addr_val >> bit) & 1:
+                    prep_qc.x(bit)
+            prep_qc.compose(qc, inplace=True)
+
+            sv = Statevector.from_label("0" * qc.num_qubits).evolve(prep_qc)
+            probs = np.abs(sv.data) ** 2
+
+            expected_val = data[addr_val]
+            found = False
+            for idx in range(len(probs)):
+                if probs[idx] < 1e-6:
+                    continue
+                out_val = 0
+                for b in range(data_bits):
+                    if (idx >> res.output_qubits[b]) & 1:
+                        out_val |= (1 << b)
+                assert out_val == expected_val, (
+                    f"addr={addr_val}: expected output {expected_val}, got {out_val}"
+                )
+                found = True
+            assert found, f"addr={addr_val}: no nonzero probability states found"
 
     def test_synthesize_qrom_auto(self):
         data = [1, 2, 3, 4, 5, 6, 7, 0]

@@ -121,6 +121,8 @@ def run_qrom(
         r.cnot_count = res.cnot_count
         r.qubit_count = res.qubit_count
         r.gate_count = res.qc.size()
+        if n_bits <= 5:
+            r.fidelity = _compute_fidelity(res.qc, state, n_bits)
     except Exception:
         r.success = False
         r.time_ms = (time.monotonic() - start) * 1000.0

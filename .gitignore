@@ -6,3 +6,5 @@ dist/
 build/
 .mplconfig/
 .cache/
+results*/
+*.csv
