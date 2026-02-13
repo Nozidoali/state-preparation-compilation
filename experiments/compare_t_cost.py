@@ -84,6 +84,19 @@ def _compute_fidelity(qc, target: State, n_bits: int) -> float:
         return 0.0
 
 
+def _compute_fidelity_qrom(qc, target: State, n_bits: int) -> float:
+    try:
+        sv = Statevector.from_label("0" * qc.num_qubits).evolve(qc)
+        probs = np.zeros(1 << n_bits)
+        for idx, amp in enumerate(sv.data):
+            probs[idx & ((1 << n_bits) - 1)] += abs(amp) ** 2
+        tgt = to_statevector(target, n_bits)
+        tgt_probs = tgt ** 2
+        return float(np.sum(np.sqrt(probs * tgt_probs)) ** 2)
+    except Exception:
+        return 0.0
+
+
 def run_rotation(
     state: State, n_bits: int, family: str, strategy: str, timeout: float
 ) -> TcostResult:
@@ -121,8 +134,8 @@ def run_qrom(
         r.cnot_count = res.cnot_count
         r.qubit_count = res.qubit_count
         r.gate_count = res.qc.size()
-        if n_bits <= 5:
-            r.fidelity = _compute_fidelity(res.qc, state, n_bits)
+        if res.qc.num_qubits <= 25:
+            r.fidelity = _compute_fidelity_qrom(res.qc, state, n_bits)
     except Exception:
         r.success = False
         r.time_ms = (time.monotonic() - start) * 1000.0
