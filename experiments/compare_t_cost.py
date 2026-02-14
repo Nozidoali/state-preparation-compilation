@@ -16,6 +16,7 @@ import csv
 import math
 import sys
 import time
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -56,8 +57,7 @@ class TcostResult:
     fidelity: float = 0.0
     success: bool = True
     qc: Optional[object] = None
-    sk_t_count: int = 0
-    sk_depth: int = 0
+    gs_t_count: int = 0
 
 
 def generate_state(family: str, n: int, seed: int) -> tuple[State, int]:
@@ -101,28 +101,53 @@ def _compute_fidelity_qrom(qc, target: State, n_bits: int) -> float:
         return 0.0
 
 
-def _transpile_clifford_t(qc, sk_depth: int = 2):
-    """Transpile a circuit to Clifford+T using Solovay-Kitaev."""
-    import warnings
-    warnings.filterwarnings("ignore", category=DeprecationWarning)
-    from qiskit import transpile as qk_transpile
-    from qiskit.transpiler.passes import SolovayKitaev
-    from qiskit.transpiler import PassManager
+# --- Gridsynth Clifford+T decomposition ---
 
-    qc_dec = qk_transpile(qc, basis_gates=["u", "cx"], optimization_level=2)
-    sk = SolovayKitaev(recursion_degree=sk_depth)
-    pm = PassManager(sk)
-    ct_qc = pm.run(qc_dec)
-    ops = ct_qc.count_ops()
-    t_count = ops.get("t", 0) + ops.get("tdg", 0) + ops.get("ccx", 0) * 4
-    return t_count
+def _gridsynth_t_count_single(theta: float, epsilon: float) -> int:
+    """T-count for a single Ry(theta) via gridsynth at precision epsilon."""
+    if abs(theta) < 1e-12:
+        return 0
+    if abs(theta - math.pi) < 1e-12 or abs(theta + math.pi) < 1e-12:
+        return 0
+
+    warnings.filterwarnings("ignore")
+    from pygridsynth import gridsynth_gates
+    gates = gridsynth_gates(theta, epsilon)
+    return gates.count("T")
+
+
+_gs_cache: Dict[tuple, int] = {}
+
+
+def _gridsynth_t_count(qc, precision_bits: int) -> int:
+    """Total T-count for a rotation circuit using gridsynth decomposition.
+
+    Each Ry(theta) is decomposed to Clifford+T at epsilon = 2^{-precision_bits}
+    via the Ross-Selinger gridsynth algorithm.  CCX gates cost 4T each.
+    """
+    epsilon = 2.0 ** (-precision_bits)
+    total = 0
+    for instr in qc.data:
+        name = instr.operation.name
+        if name == "ry":
+            theta = float(instr.operation.params[0])
+            key = (round(theta * 1e10), precision_bits)
+            if key not in _gs_cache:
+                _gs_cache[key] = _gridsynth_t_count_single(theta, epsilon)
+            total += _gs_cache[key]
+        elif name == "ccx":
+            total += 4
+        elif name in ("t", "tdg"):
+            total += 1
+    return total
 
 
 def run_rotation(
     state: State, n_bits: int, family: str, strategy: str, timeout: float,
-    sk_depth: int = 0,
+    precision_bits: int = 0,
 ) -> TcostResult:
-    r = TcostResult(family=family, n=n_bits, m=len(state), approach=f"rotation_{strategy}")
+    r = TcostResult(family=family, n=n_bits, m=len(state),
+                    approach=f"rotation_{strategy}", precision_bits=precision_bits)
     start = time.monotonic()
     try:
         if strategy == "sparse":
@@ -138,10 +163,9 @@ def run_rotation(
         r.qc = qc
         if n_bits <= 10:
             r.fidelity = _compute_fidelity(qc, state, n_bits)
-        if sk_depth > 0 and r.ry_count > 0:
-            r.sk_t_count = _transpile_clifford_t(qc, sk_depth)
-            r.sk_depth = sk_depth
-    except Exception as e:
+        if precision_bits > 0 and r.ry_count > 0:
+            r.gs_t_count = _gridsynth_t_count(qc, precision_bits)
+    except Exception:
         r.success = False
         r.time_ms = (time.monotonic() - start) * 1000.0
     return r
@@ -173,7 +197,7 @@ def run_qrom(
 CSV_HEADER = [
     "family", "n", "m", "approach", "precision_bits",
     "t_count", "ry_count", "cnot_count", "qubit_count", "gate_count",
-    "time_ms", "fidelity", "success", "sk_t_count", "sk_depth",
+    "time_ms", "fidelity", "success", "gs_t_count",
 ]
 
 
@@ -207,14 +231,14 @@ def run_benchmarks(args: argparse.Namespace) -> List[TcostResult]:
                         msg += f", seed={seed}"
                     print(msg, file=sys.stderr)
 
-                for strat in ["sparse", "dense"]:
-                    r = run_rotation(state, n_bits, family, strat, args.timeout,
-                                     sk_depth=args.sk_depth)
-                    results.append(r)
-                    if args.verbose:
-                        _print_result(r)
-
                 for b in precisions:
+                    for strat in ["sparse", "dense"]:
+                        r = run_rotation(state, n_bits, family, strat, args.timeout,
+                                         precision_bits=b)
+                        results.append(r)
+                        if args.verbose:
+                            _print_result(r)
+
                     r_basic = run_qrom(state, n_bits, family, b, False)
                     results.append(r_basic)
                     if args.verbose:
@@ -231,10 +255,10 @@ def _print_result(r: TcostResult) -> None:
     status = "" if r.success else " [FAILED]"
     fid_str = f" fid={r.fidelity:.4f}" if r.fidelity > 0 else ""
     ry_str = f" Ry={r.ry_count:4d}" if r.ry_count > 0 else ""
-    sk_str = f" SK_T={r.sk_t_count:6d}" if r.sk_t_count > 0 else ""
+    gs_str = f" GS_T={r.gs_t_count:6d}" if r.gs_t_count > 0 else ""
     print(
         f"    {r.approach:16s} b={r.precision_bits:2d}"
-        f" T={r.t_count:8d}{ry_str}{sk_str} CNOT={r.cnot_count:6d}"
+        f" T={r.t_count:8d}{ry_str}{gs_str} CNOT={r.cnot_count:6d}"
         f" q={r.qubit_count:4d} t={r.time_ms:8.1f}ms{fid_str}{status}",
         file=sys.stderr,
     )
@@ -250,7 +274,7 @@ def write_csv(results: List[TcostResult], path: Path) -> None:
                 r.t_count, r.ry_count, r.cnot_count, r.qubit_count, r.gate_count,
                 f"{r.time_ms:.2f}", f"{r.fidelity:.6f}",
                 "true" if r.success else "false",
-                r.sk_t_count, r.sk_depth,
+                r.gs_t_count,
             ])
 
 
@@ -285,27 +309,29 @@ def _print_comparison_table(results: List[TcostResult]) -> None:
     for r in results:
         if not r.success:
             continue
-        key = (r.family, r.n)
+        key = (r.family, r.n, r.precision_bits)
         groups.setdefault(key, []).append(r)
 
-    print("\n=== T-count Comparison (Rotation SK vs QROM) ===\n")
-    header = f"{'state':>8s} {'approach':>18s} {'b':>3s} {'T':>8s} {'SK_T':>8s} {'Ry':>5s} {'CNOT':>6s} {'q':>4s} {'fid':>8s}"
+    print("\n=== T-count Comparison (Rotation gridsynth vs QROM) ===\n")
+    header = (f"{'state':>15s} {'approach':>18s} {'b':>3s}"
+              f" {'T':>8s} {'GS_T':>8s} {'Ry':>5s} {'CNOT':>6s} {'q':>4s}")
     print(header)
     print("-" * len(header))
 
+    prev_key = None
     for key in sorted(groups.keys()):
+        if prev_key and (key[0], key[1]) != (prev_key[0], prev_key[1]):
+            print()
+        prev_key = key
         for r in groups[key]:
             t_str = str(r.t_count) if r.t_count > 0 else "-"
-            sk_str = str(r.sk_t_count) if r.sk_t_count > 0 else "-"
+            gs_str = str(r.gs_t_count) if r.gs_t_count > 0 else "-"
             ry_str = str(r.ry_count) if r.ry_count > 0 else "-"
-            fid_str = f"{r.fidelity:.4f}" if r.fidelity > 0 else "-"
-            b_str = str(r.precision_bits) if r.precision_bits > 0 else "-"
             print(
-                f"{r.family+'_'+str(r.n):>8s} {r.approach:>18s} {b_str:>3s}"
-                f" {t_str:>8s} {sk_str:>8s} {ry_str:>5s} {r.cnot_count:>6d}"
-                f" {r.qubit_count:>4d} {fid_str:>8s}"
+                f"{r.family+'_'+str(r.n):>15s} {r.approach:>18s} {r.precision_bits:3d}"
+                f" {t_str:>8s} {gs_str:>8s} {ry_str:>5s} {r.cnot_count:>6d}"
+                f" {r.qubit_count:>4d}"
             )
-        print()
 
 
 def main() -> None:
@@ -313,15 +339,13 @@ def main() -> None:
     parser.add_argument("--n-min", type=int, default=3)
     parser.add_argument("--n-max", type=int, default=8)
     parser.add_argument("-f", "--family", default="all")
-    parser.add_argument("-b", "--precision", default="1,2,4")
+    parser.add_argument("-b", "--precision", default="1,2,4,8")
     parser.add_argument("-s", "--seeds", type=int, default=3)
     parser.add_argument("-t", "--timeout", type=float, default=120.0)
     parser.add_argument("-o", "--output", default=None)
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--save-circuits", action="store_true",
                         help="Save circuits as QASM and PNG")
-    parser.add_argument("--sk-depth", type=int, default=0,
-                        help="Solovay-Kitaev recursion depth for Clifford+T transpilation (0=skip)")
     args = parser.parse_args()
 
     results = run_benchmarks(args)
@@ -335,8 +359,7 @@ def main() -> None:
         save_circuits(results, circ_dir)
         print(f"Saved circuits to {circ_dir}")
 
-    if args.sk_depth > 0:
-        _print_comparison_table(results)
+    _print_comparison_table(results)
 
 
 if __name__ == "__main__":

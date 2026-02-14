@@ -12,9 +12,7 @@ import math
 import time
 from typing import Dict, List, Optional, Tuple
 
-import numpy as np
 from qiskit.circuit import QuantumCircuit
-from qiskit.circuit.library import UnitaryGate
 
 from qsp.state import EPS, State, cardinality, get_supports, state_hash
 from qsp.rotation.common import (
@@ -193,23 +191,45 @@ def prepare_state_dense(
     return qc
 
 
-def _build_uc_ry_gate(angles: List[float]) -> UnitaryGate:
-    n_angles = len(angles)
-    n_ctrl = int(math.log2(n_angles))
-    dim = 2 * n_angles
-    u = np.eye(dim, dtype=complex)
+_DEMUX_TOL = 1e-10
 
-    for i, theta in enumerate(angles):
-        c = math.cos(theta / 2.0)
-        s = math.sin(theta / 2.0)
-        row0 = i
-        row1 = i + n_angles
-        u[row0, row0] = c
-        u[row0, row1] = -s
-        u[row1, row0] = s
-        u[row1, row1] = c
 
-    return UnitaryGate(u)
+def _demux_ry(qc: QuantumCircuit, angles: List[float],
+              target: int, controls: List[int]) -> None:
+    """Decompose uniformly-controlled Ry using recursive Gray code splitting.
+
+    Ported from hlqcs ``csd.cpp::demux_ry``.  Produces 2^k single-qubit Ry
+    gates and 2^k CNOT gates for k control qubits — no unitary matrices.
+    """
+    if not controls:
+        if abs(angles[0]) > _DEMUX_TOL:
+            qc.ry(angles[0], target)
+        return
+
+    k = len(controls)
+    n_angles = 1 << k
+    assert len(angles) == n_angles
+
+    if k == 1:
+        a = (angles[0] + angles[1]) / 2.0
+        b = (angles[0] - angles[1]) / 2.0
+        if abs(a) > _DEMUX_TOL:
+            qc.ry(a, target)
+        qc.cx(controls[0], target)
+        if abs(b) > _DEMUX_TOL:
+            qc.ry(b, target)
+        qc.cx(controls[0], target)
+        return
+
+    half = n_angles // 2
+    even = [(angles[i] + angles[i + half]) / 2.0 for i in range(half)]
+    odd = [(angles[i] - angles[i + half]) / 2.0 for i in range(half)]
+
+    sub_controls = controls[:-1]
+    _demux_ry(qc, even, target, sub_controls)
+    qc.cx(controls[-1], target)
+    _demux_ry(qc, odd, target, sub_controls)
+    qc.cx(controls[-1], target)
 
 
 def _emit_gates(qc: QuantumCircuit, gates: List[dict]) -> None:
@@ -230,12 +250,7 @@ def _emit_gates(qc: QuantumCircuit, gates: List[dict]) -> None:
             controls = g["controls"]
             angles = g["angles"]
             target = g["target"]
-            if len(angles) == 1:
-                qc.ry(angles[0], target)
-            else:
-                gate = _build_uc_ry_gate(angles)
-                qubits = controls + [target]
-                qc.append(gate, qubits)
+            _demux_ry(qc, angles, target, controls)
         elif g["type"] == "mcry":
             from qsp.rotation.sparse import _emit_gates as _sparse_emit
             _sparse_emit(qc, [g])
