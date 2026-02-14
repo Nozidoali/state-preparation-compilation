@@ -184,8 +184,8 @@ def prepare_state_dense(
     elif cardinality(curr) > 1:
         sparse_qc = prepare_state_sparse(curr, n_bits, timeout - (time.monotonic() - start))
         all_gates.reverse()
+        qc.compose(sparse_qc, inplace=True)
         _emit_gates(qc, all_gates)
-        qc.compose(sparse_qc.reverse_ops(), inplace=True)
         return qc
 
     all_gates.reverse()
@@ -202,8 +202,8 @@ def _build_uc_ry_gate(angles: List[float]) -> UnitaryGate:
     for i, theta in enumerate(angles):
         c = math.cos(theta / 2.0)
         s = math.sin(theta / 2.0)
-        row0 = 2 * i
-        row1 = 2 * i + 1
+        row0 = i
+        row1 = i + n_angles
         u[row0, row0] = c
         u[row0, row1] = -s
         u[row1, row0] = s

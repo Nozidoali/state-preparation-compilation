@@ -19,6 +19,10 @@ def count_cnots(qc: QuantumCircuit) -> int:
     return qc.count_ops().get("cx", 0)
 
 
+def count_ry(qc: QuantumCircuit) -> int:
+    return qc.count_ops().get("ry", 0)
+
+
 def verify_state_preparation(
     qc: QuantumCircuit,
     target: State,
